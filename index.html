@@ -14,16 +14,21 @@
     </div>
 
     <div class="p-6 space-y-6">
-      <!-- 上段：音声入力ボタンエリア（テキストエリア撤廃） -->
-      <div class="text-center space-y-3">
+      <!-- 上段：音声入力エリア -->
+      <div class="space-y-3">
         <button id="micBtn" type="button" class="w-full py-4 px-6 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold rounded-xl shadow-md transition flex items-center justify-center space-x-2 text-base">
           <span id="micIcon" class="text-xl">🎙️</span>
           <span id="micText">タップして音声入力</span>
         </button>
-        <!-- 音声認識結果のプレビュー表示 -->
-        <p id="transcriptPreview" class="text-xs text-slate-500 min-h-[1.25rem] px-2 truncate">
+        
+        <p id="transcriptPreview" class="text-xs text-slate-500 min-h-[1.25rem] px-2 text-center truncate">
           ボタンを押して話しかけてください（例：75歳男性 60kg Cre1.2 セファゾリン）
         </p>
+
+        <!-- マイク認識が遮断された場合の代替フォールバック入力欄（通常時は非表示） -->
+        <div id="fallbackInputArea" class="hidden pt-2">
+          <input type="text" id="manualInput" class="w-full p-2.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500" placeholder="キーボードのマイクまたは直接入力してください">
+        </div>
       </div>
 
       <hr class="border-slate-200">
@@ -125,7 +130,7 @@
         drugSelect.appendChild(optgroup);
       });
 
-      // 照合用辞書（平坦化）
+      // 照合用辞書
       const candidateList = [];
       antibioticsData.forEach(drug => {
         candidateList.push({ id: drug.drug_id, targetText: toKatakana(drug.drug_name) });
@@ -152,7 +157,11 @@
         for (let i = 1; i <= len1; i++) {
           for (let j = 1; j <= len2; j++) {
             const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
-            d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+            d[i][j] = Math.min(
+              d[i - 1][j] + 1,
+              d[i][j - 1] + 1,
+              d[i - 1][j - 1] + cost
+            );
           }
         }
         return d[len1][len2];
@@ -243,7 +252,7 @@
         el.addEventListener('change', checkAndCalculate);
       });
 
-      // 3. 音声認識テキストのパラメーター解析処理
+      // 3. パラメーター解析処理
       function processVoiceTranscript(text) {
         const normalizedText = normalizeText(text);
 
@@ -263,77 +272,100 @@
             document.getElementById('drugSelect').value = matchedId;
           }
         }
-
         checkAndCalculate();
       }
 
-      // 4. 音声認識（Web Speech API）制御
+      // 4. 音声認識（Web Speech API）Chrome / Safari 両対応制御
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       const micBtn = document.getElementById('micBtn');
       const micIcon = document.getElementById('micIcon');
       const micText = document.getElementById('micText');
       const transcriptPreview = document.getElementById('transcriptPreview');
+      const fallbackInputArea = document.getElementById('fallbackInputArea');
+      const manualInput = document.getElementById('manualInput');
+
+      manualInput.addEventListener('input', function() {
+        processVoiceTranscript(this.value);
+      });
 
       if (!SpeechRecognition) {
+        fallbackInputArea.classList.remove('hidden');
         micBtn.classList.replace('bg-blue-600', 'bg-slate-400');
-        micBtn.classList.add('cursor-not-allowed');
-        micText.textContent = "音声認識非対応のブラウザです";
+        micText.textContent = "音声認識非対応（下の枠に入力）";
         micBtn.disabled = true;
       } else {
-        const recognition = new SpeechRecognition();
-        recognition.lang = 'ja-JP';
-        recognition.interimResults = true;
-        recognition.continuous = false;
-
+        let recognition = null;
         let isListening = false;
 
-        function setListeningState(active) {
-          isListening = active;
-          if (active) {
+        function createRecognitionInstance() {
+          const rec = new SpeechRecognition();
+          rec.lang = 'ja-JP';
+          // Chromeでの切断を防ぐため interimResults は true にしつつ短時間で確定させる
+          rec.interimResults = true;
+          rec.continuous = false;
+
+          rec.onstart = () => {
+            isListening = true;
             micBtn.className = "w-full py-4 px-6 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-bold rounded-xl shadow-md transition flex items-center justify-center space-x-2 text-base animate-pulse";
             micIcon.textContent = "⏹️";
-            micText.textContent = "聞き取り中...（話しかけてください）";
+            micText.textContent = "聞き取り中...（タップで終了）";
             transcriptPreview.textContent = "音声を聞き取っています...";
             transcriptPreview.classList.add('text-blue-600', 'font-semibold');
-          } else {
+          };
+
+          rec.onresult = (event) => {
+            let currentText = '';
+            for (let i = 0; i < event.results.length; i++) {
+              currentText += event.results[i][0].transcript;
+            }
+            transcriptPreview.textContent = `認識結果: "${currentText}"`;
+            processVoiceTranscript(currentText);
+          };
+
+          rec.onend = () => {
+            isListening = false;
             micBtn.className = "w-full py-4 px-6 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold rounded-xl shadow-md transition flex items-center justify-center space-x-2 text-base";
             micIcon.textContent = "🎙️";
             micText.textContent = "タップして音声入力";
             transcriptPreview.classList.remove('text-blue-600', 'font-semibold');
-          }
+          };
+
+          rec.onerror = (event) => {
+            console.warn("音声認識エラー:", event.error);
+            isListening = false;
+            micBtn.className = "w-full py-4 px-6 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-md transition flex items-center justify-center space-x-2 text-base";
+            micIcon.textContent = "🎙️";
+            micText.textContent = "タップして音声入力";
+
+            if (event.error === 'not-allowed') {
+              transcriptPreview.textContent = "マイクが許可されていません（iPhone設定 > Chrome > マイクを確認）";
+              fallbackInputArea.classList.remove('hidden');
+            } else if (event.error === 'no-speech') {
+              transcriptPreview.textContent = "音声が検出されませんでした。もう一度タップしてください。";
+            } else if (event.error !== 'aborted') {
+              transcriptPreview.textContent = `認識中断 (${event.error})。下の入力欄をご利用ください。`;
+              fallbackInputArea.classList.remove('hidden');
+            }
+          };
+
+          return rec;
         }
 
+        // タップ時の即時起動
         micBtn.addEventListener('click', () => {
           if (isListening) {
-            recognition.stop();
+            if (recognition) recognition.stop();
           } else {
             try {
+              // 毎回新規インスタンスを生成してiOS Chromeのステート固着を防止
+              recognition = createRecognitionInstance();
               recognition.start();
-              setListeningState(true);
             } catch (err) {
-              console.error("マイク起動エラー:", err);
+              console.error("起動失敗:", err);
+              fallbackInputArea.classList.remove('hidden');
             }
           }
         });
-
-        recognition.onresult = (event) => {
-          let currentText = '';
-          for (let i = 0; i < event.results.length; i++) {
-            currentText += event.results[i][0].transcript;
-          }
-          transcriptPreview.textContent = `認識中: "${currentText}"`;
-          processVoiceTranscript(currentText);
-        };
-
-        recognition.onend = () => {
-          setListeningState(false);
-        };
-
-        recognition.onerror = (event) => {
-          console.warn("音声認識エラー:", event.error);
-          transcriptPreview.textContent = "音声認識が中断されました。再度お試しください。";
-          setListeningState(false);
-        };
       }
     });
   </script>
